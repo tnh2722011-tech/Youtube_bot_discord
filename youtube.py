@@ -1,167 +1,164 @@
-import discord
-from discord.ext import commands, tasks
-import yt_dlp
-from datetime import datetime, timedelta
-import os
+import requests, time, json, random, sys, os
+import websocket
+from threading import Thread
+from datetime import datetime
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.voice_states = True
+class Color:
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    END = '\033[0m'
+    BLUE = '\033[94m'
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-bot.inactivity_starts = {}
-bot.last_text_channels = {}
-bot.current_owners = {}          # guild_id : member là chủ video đang phát
+class UltraBattle:
+    def __init__(self, token):
+        self.token = token
+        self.headers = {'Authorization': token, 'Content-Type': 'application/json'}
+        self.mimi_id = "1207923287519268875"
+        self.own_id = None
+        self.username = "Unknown"
+        
+        self.is_running = False
+        self.active_channel = None
+        self.stats = {"battle": 0, "stamina_used": 0}
+        self.logs = []
 
-@bot.event
-async def on_ready():
-    print(f'✅ Bot đã online: {bot.user}')
-    try:
-        await bot.tree.sync()
-        print("✅ Slash commands đã sync")
-    except Exception as e:
-        print(f"Lỗi sync: {e}")
-    inactivity_check.start()
+        if self._get_user_info():
+            self.add_log(f"Đã đăng nhập: {self.username}")
+            self._start_gateway()
 
-@tasks.loop(minutes=3)
-async def inactivity_check():
-    for guild_id in list(bot.inactivity_starts.keys()):
-        start_time = bot.inactivity_starts[guild_id]
-        guild = bot.get_guild(guild_id)
-        if not guild:
-            bot.inactivity_starts.pop(guild_id, None)
-            continue
-        vc = guild.voice_client
-        if vc and vc.is_connected() and not vc.is_playing() and not vc.is_paused():
-            if datetime.now() - start_time > timedelta(minutes=15):
-                await vc.disconnect()
-                if guild_id in bot.last_text_channels:
-                    try:
-                        await bot.last_text_channels[guild_id].send("🚪 Bot đã rời kênh thoại do video đã phát xong và không có lệnh phát mới trong 15 phút.")
-                    except:
-                        pass
-                bot.inactivity_starts.pop(guild_id, None)
-                bot.last_text_channels.pop(guild_id, None)
-                bot.current_owners.pop(guild_id, None)
+    def _get_user_info(self):
+        try:
+            res = requests.get("https://discord.com/api/v9/users/@me", headers=self.headers)
+            if res.status_code == 200:
+                data = res.json()
+                self.own_id, self.username = data['id'], data['username']
+                return True
+        except: return False
+        return False
 
-@bot.tree.command(name="join", description="Bot join kênh thoại")
-async def join(interaction: discord.Interaction):
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.response.send_message("❌ Bạn phải ở trong kênh thoại!")
-        return
-    channel = interaction.user.voice.channel
-    if interaction.guild.voice_client is not None:
-        await interaction.response.send_message("✅ Bot đã ở trong kênh thoại rồi!")
-        return
-    try:
-        vc = await channel.connect()
-        await interaction.guild.me.edit(mute=True, deafen=True)
-        await interaction.response.send_message(f"✅ Bot đã join **{channel.name}** (mic + loa đã tắt)")
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Lỗi join: {str(e)}")
+    def add_log(self, text):
+        now = datetime.now().strftime("%H:%M:%S")
+        self.logs.append(f"[{now}] {text[:50]}")
+        self._update_dashboard()
 
-async def play_audio(vc, url, text_channel, owner):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            audio_url = info['url']
-            title = info.get('title', 'Video YouTube')
-    except Exception as e:
-        await text_channel.send(f"❌ Không tải được video: {str(e)}")
-        return
+    def _update_dashboard(self):
+        os.system('clear')
+        status = f"{Color.GREEN}ĐANG CHẠY{Color.END}" if self.is_running else f"{Color.RED}ĐANG DỪNG{Color.END}"
+        print(f"{Color.CYAN}{Color.BOLD} ⚔️ DISCORD AUTO BATTLE v1.0 ⚔️ {Color.END}")
+        print(f"👤 User: {Color.BOLD}{self.username}{Color.END} | Trạng thái: {status}")
+        print(f"📊 Battle: {self.stats['battle']} | Stamina: {self.stats['stamina_used']}")
+        print(f"{Color.BLUE}--------------------------------------------------{Color.END}")
+        for log in self.logs[-6:]: print(f" {log}")
+        print(f"{Color.BLUE}--------------------------------------------------{Color.END}")
+        print(f"{Color.YELLOW}Dùng ',play' để bắt đầu | ',stop' để dừng (trong Discord){Color.END}")
 
-    ffmpeg_options = {
-        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-        'options': '-vn -loglevel quiet',
-    }
-    source = discord.FFmpegPCMAudio(audio_url, **ffmpeg_options, executable='ffmpeg')
+    def _send_msg(self, channel_id, content):
+        try:
+            # Cơ chế Fake Soạn (Typing)
+            requests.post(f"https://discord.com/api/v9/channels/{channel_id}/typing", headers=self.headers)
+            # Thời gian soạn tin ngẫu nhiên 
+            time.sleep(random.uniform(0.5, 1.0))
+            
+            res = requests.post(f"https://discord.com/api/v9/channels/{channel_id}/messages", 
+                                headers=self.headers, json={"content": content})
+            return res.status_code == 200
+        except: return False
 
-    def after_playing(error):
-        if error:
-            print(f"Player error: {error}")
-        guild = vc.guild
-        bot.inactivity_starts[guild.id] = datetime.now()
-        bot.current_owners.pop(guild.id, None)   # Xóa owner khi video hết
+    def _battle_loop(self, channel_id):
+        """Vòng lặp gửi .battle mỗi 40 giây"""
+        while self.is_running and self.active_channel == channel_id:
+            if self._send_msg(channel_id, ".battle"):
+                self.stats['battle'] += 1
+                self.add_log(f"Đã gửi .battle (Lần {self.stats['battle']})")
+                # Chờ 40s cho lượt tiếp theo
+                for _ in range(40):
+                    if not self.is_running or self.active_channel != channel_id: break
+                    time.sleep(1)
+            else:
+                self.add_log(f"{Color.RED}Lỗi mạng! Đóng băng 10s...{Color.END}")
+                time.sleep(10)
 
-    vc.play(source, after=after_playing)
-    await text_channel.send(f"🎵 **Đang phát:** {title}\n👑 **Chủ video:** {owner.mention} (chỉ người này mới pause/resume được)")
+    def on_message(self, msg):
+        d = msg.get('d', {})
+        content = d.get('content', '')
+        author_id = d.get('author', {}).get('id')
+        channel_id = d.get('channel_id')
 
-@bot.event
-async def on_message(message):
-    if message.author.bot or message.guild is None:
-        return
+        # Lệnh điều khiển
+        if author_id == self.own_id:
+            if content == ",play":
+                if not self.is_running:
+                    self.is_running = True
+                    self.active_channel = channel_id
+                    Thread(target=self._battle_loop, args=(channel_id,), daemon=True).start()
+                    self.add_log("Kích hoạt Auto Battle!")
+            elif content == ",stop":
+                self.is_running = False
+                self.active_channel = None
+                self.add_log("Đã dừng Battle.")
 
-    content = message.content.strip()
+        # Quét tin nhắn từ Mimi (Chỉ quét trong channel đang chạy)
+        if author_id == self.mimi_id and self.is_running and channel_id == self.active_channel:
+            
+            # Kiểm tra xem có phải Mimi đang trả lời mình không
+            is_reply_to_me = False
+            if 'referenced_message' in d and d['referenced_message'] is not None:
+                if d['referenced_message'].get('author', {}).get('id') == self.own_id:
+                    is_reply_to_me = True
+            
+            # Kiểm tra Mention
+            if not is_reply_to_me:
+                for user in d.get('mentions', []):
+                    if user.get('id') == self.own_id:
+                        is_reply_to_me = True
 
-    # Lệnh phat!
-    if content.lower().startswith("phat! "):
-        link = content[6:].strip()
-        if not link:
-            await message.channel.send("❌ Vui lòng gửi link YouTube sau lệnh `phat!`")
-            return
-        vc = message.guild.voice_client
-        if not vc or not vc.is_connected():
-            await message.channel.send("❌ Bot chưa join kênh thoại! Dùng lệnh `/join` trước.")
-            return
+            if is_reply_to_me:
+                # Cập nhật logic: Chỉ cần thấy "Không đủ thể lực" là xử lý ngay
+                if "Không đủ thể lực" in content:
+                    self.add_log(f"{Color.YELLOW}Phát hiện hết thể lực! Đang soạn tin hồi phục...{Color.END}")
+                    if self._send_msg(channel_id, ".use STAMINA-S"):
+                        self.stats['stamina_used'] += 1
+                        self.add_log("Đã sử dụng Bình Thể Lực (S)")
 
-        # Reset timer + set owner mới
-        bot.inactivity_starts.pop(message.guild.id, None)
-        bot.last_text_channels[message.guild.id] = message.channel
-        bot.current_owners[message.guild.id] = message.author   # Người gõ phat! là owner
+    def _start_gateway(self):
+        while True:
+            try:
+                ws = websocket.WebSocket()
+                ws.connect("wss://gateway.discord.gg/?v=9&encoding=json")
+                ws.send(json.dumps({
+                    "op": 2,
+                    "d": {
+                        "token": self.token,
+                        "properties": {"os": "android", "browser": "Discord Android", "device": "Xiaomi"}
+                    }
+                }))
 
-        if vc.is_playing() or vc.is_paused():
-            vc.stop()
+                while True:
+                    result = ws.recv()
+                    if not result: break
+                    res = json.loads(result)
+                    if res.get('op') == 10:
+                        interval = res['d']['heartbeat_interval'] / 1000
+                        Thread(target=self._heartbeat, args=(ws, interval), daemon=True).start()
+                    if res.get('t') == "MESSAGE_CREATE":
+                        self.on_message(res)
+            except Exception:
+                self.add_log(f"{Color.RED}Mất kết nối! Reconnect sau 5s...{Color.END}")
+                time.sleep(5)
 
-        await play_audio(vc, link, message.channel, message.author)
-
-    # Lệnh dung! - Chỉ owner mới được dùng
-    elif content.lower() == "dung!":
-        vc = message.guild.voice_client
-        if not vc or not vc.is_connected():
-            await message.channel.send("❌ Bot chưa join kênh thoại!")
-            return
-
-        owner = bot.current_owners.get(message.guild.id)
-        if owner and owner.id != message.author.id:
-            await message.channel.send(f"❌ Chỉ **{owner.mention}** (người phát video) mới được dùng lệnh `dung!`")
-            return
-
-        if vc.is_playing():
-            vc.pause()
-            await message.channel.send("⏸️ Video đã tạm dừng!")
-        elif vc.is_paused():
-            vc.resume()
-            await message.channel.send("▶️ Video đã tiếp tục phát!")
-        else:
-            await message.channel.send("Không có video nào đang phát.")
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if member.id == bot.user.id and after.channel is None:
-        guild_id = before.channel.guild.id if before.channel else None
-        if guild_id:
-            bot.inactivity_starts.pop(guild_id, None)
-            bot.last_text_channels.pop(guild_id, None)
-            bot.current_owners.pop(guild_id, None)
-
-def load_token():
-    if not os.path.exists("Token.txt"):
-        print("❌ Không tìm thấy file Token.txt!")
-        exit(1)
-    with open("Token.txt", "r", encoding="utf-8") as f:
-        for line in f:
-            if line.startswith("token="):
-                return line[6:].strip()
-    print("❌ Không tìm thấy dòng token= trong Token.txt")
-    exit(1)
+    def _heartbeat(self, ws, interval):
+        while True:
+            try:
+                time.sleep(interval)
+                ws.send(json.dumps({"op": 1, "d": None}))
+            except: break
 
 if __name__ == "__main__":
-    token = load_token()
-    bot.run(token)
+    os.system('clear')
+    print(f"{Color.CYAN}--- DISCORD TOOL SETUP ---{Color.END}")
+    tk = input(f"Nhập Token User: ").strip()
+    UltraBattle(tk)
+    
